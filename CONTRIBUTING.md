@@ -52,6 +52,12 @@ git checkout -b your-branch-name upstream/main
 
 When ready to submit, push your branch and open a pull request against `main`.
 
+## Before You Start
+
+Open an issue first and wait for a maintainer go-ahead before writing code. This keeps effort on changes the project actually needs and avoids duplicate work.
+
+Defensive or hardening changes are accepted only with evidence that the bad input actually occurs in a deployed environment: a log excerpt, a captured response, or a failed round. Guards against inputs that have never been observed are closed.
+
 ## Pull Request Requirements
 
 Before submitting a PR:
@@ -61,6 +67,19 @@ Before submitting a PR:
 - Mark your PR as a [draft](https://github.blog/2019-02-14-introducing-draft-pull-requests/) until it's ready for review
 - Fill in the PR template with a clear description of your changes
 - Keep PRs focused — one feature or fix per PR
+- Link the approved issue in the PR description
+
+### Hash-pinned scoring modules
+
+The validator sidecars pin these files by content hash and fail closed on any change:
+
+- `scoring_service/services/response_parser.py`
+- `scoring_service/services/unl_selector.py`
+- `scoring_service/services/score_formula.py`
+- `scoring_service/services/diversity_formula.py`
+- `scoring_service/services/commit_reveal.py`
+
+Changing a single byte of them forces every validator operator to upgrade their sidecar before the next round. These files only change together with a planned behavioral change and a coordinated sidecar release. Open an issue and wait for a maintainer go-ahead before starting a PR that touches them; unsolicited PRs against these files are closed.
 
 ## Repository Layout
 

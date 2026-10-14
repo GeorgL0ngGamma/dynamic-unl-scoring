@@ -2,8 +2,14 @@
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+from xrpl.utils import hex_to_str
+
+from scoring_service.clients.pftl import PFTLClient
+from scoring_service.config import settings
 from scoring_service.services.commit_reveal import (
     ROUND_ANNOUNCEMENT_TYPE,
     validate_round_announcement,
@@ -115,6 +121,10 @@ class TestPublish:
         memo_data = mock_pftl.submit_memo.call_args[0][0]
         parsed = json.loads(memo_data)
         assert parsed["type"] == "pf_dynamic_unl_override"
+        assert (
+            mock_pftl.submit_memo.call_args[1]["memo_type"]
+            == "pf_dynamic_unl_override"
+        )
 
     @patch("scoring_service.services.onchain_publisher.settings")
     def test_default_memo_type_used_when_not_specified(self, mock_settings):
@@ -133,6 +143,58 @@ class TestPublish:
         memo_data = mock_pftl.submit_memo.call_args[0][0]
         parsed = json.loads(memo_data)
         assert parsed["type"] == "pf_dynamic_unl"
+        assert mock_pftl.submit_memo.call_args[1]["memo_type"] == "pf_dynamic_unl"
+
+
+class TestPublishOnChainMemoType:
+    """The transaction's MemoType equals the payload `type`, through the real
+    PFTLClient.submit_memo. Signing and the network are stubbed: the wallet is
+    an address-only object, so no key is used."""
+
+    @pytest.mark.parametrize(
+        "memo_type, expected",
+        [
+            (None, settings.scoring_memo_type),
+            ("", settings.scoring_memo_type),
+            (settings.scoring_memo_type, settings.scoring_memo_type),
+            (
+                settings.scoring_memo_type_override,
+                settings.scoring_memo_type_override,
+            ),
+        ],
+    )
+    @patch("scoring_service.clients.pftl.submit_and_wait")
+    @patch("scoring_service.clients.pftl.autofill")
+    def test_memo_type_matches_payload_type(
+        self, mock_autofill, mock_submit, memo_type, expected
+    ):
+        mock_autofill.side_effect = lambda tx, client: tx
+        mock_submit.return_value = MagicMock(
+            is_successful=MagicMock(return_value=True),
+            result={"hash": "TXHASH"},
+        )
+        client = PFTLClient(
+            rpc_url="https://rpc.example.com",
+            wallet_secret="unused-stub",
+            memo_destination="rTestDestination",
+            network_id=2025,
+        )
+        client._wallet = SimpleNamespace(
+            classic_address="rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+        )
+
+        tx_hash = OnChainPublisherService(pftl_client=client).publish(
+            final_bundle_cid="QmCID",
+            vl_sequence=7,
+            round_number=9,
+            memo_type=memo_type,
+        )
+
+        assert tx_hash == "TXHASH"
+        (memo,) = mock_autofill.call_args[0][0].memos
+        payload = json.loads(hex_to_str(memo.memo_data))
+        assert hex_to_str(memo.memo_type) == expected
+        assert payload["type"] == expected
 
 
 class TestPublishRoundAnnouncement:
