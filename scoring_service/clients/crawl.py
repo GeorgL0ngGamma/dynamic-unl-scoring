@@ -48,7 +48,8 @@ class CrawlClient:
         but not a non-empty string is logged and treated as no pubkey
         instead of raising and aborting the rest of the crawl.
         """
-        url = f"https://{ip}:{port}/crawl"
+        host = f"[{ip}]" if ":" in ip and not ip.startswith("[") else ip
+        url = f"https://{host}:{port}/crawl"
         try:
             response = self._client.get(url)
             response.raise_for_status()
@@ -66,7 +67,7 @@ class CrawlClient:
                     url, "server.pubkey_validator", pubkey, "a non-empty string"
                 )
             return pubkey
-        except (httpx.HTTPError, httpx.TimeoutException, ValueError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             logger.warning("Failed to probe %s — %s", url, exc)
             return None
 
