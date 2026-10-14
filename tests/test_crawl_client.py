@@ -1,8 +1,10 @@
 """Tests for the CrawlClient validator IP resolution."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from scoring_service.clients.crawl import CrawlClient
 from scoring_service.constants import PEER_PROTOCOL_PORT
@@ -32,6 +34,42 @@ def _mock_response(json_data, status_code=200):
     response.json.return_value = json_data
     response.raise_for_status.return_value = None
     return response
+
+
+CRAWL_LOGGER = "scoring_service.clients.crawl"
+
+# (malformed /crawl body, field named in the warning, type named in the warning)
+MALFORMED_BODIES = [
+    (None, "body", "NoneType"),
+    ([], "body", "list"),
+    ("text", "body", "str"),
+    (0, "body", "int"),
+    ({"server": None}, "server", "NoneType"),
+    ({"server": "up"}, "server", "str"),
+    ({"server": []}, "server", "list"),
+    ({"server": {"pubkey_validator": ["nH"]}}, "server.pubkey_validator", "list"),
+    ({"server": {"pubkey_validator": 5}}, "server.pubkey_validator", "int"),
+    ({"server": {"pubkey_validator": ""}}, "server.pubkey_validator", "an empty string"),
+]
+MALFORMED_IDS = [
+    "body-null",
+    "body-list",
+    "body-string",
+    "body-int",
+    "server-null",
+    "server-string",
+    "server-list",
+    "pubkey-list",
+    "pubkey-int",
+    "pubkey-empty",
+]
+
+
+def _crawl_warnings(caplog):
+    return [
+        r for r in caplog.records
+        if r.name == CRAWL_LOGGER and r.levelno == logging.WARNING
+    ]
 
 
 class TestProbeNode:
@@ -70,6 +108,55 @@ class TestProbeNode:
         client = CrawlClient()
         result = client._probe_node("10.0.0.1", PEER_PROTOCOL_PORT)
         assert result is None
+
+    @pytest.mark.parametrize(
+        ("body", "field", "kind"), MALFORMED_BODIES, ids=MALFORMED_IDS
+    )
+    @patch.object(httpx.Client, "get")
+    def test_returns_none_and_warns_on_malformed_body(
+        self, mock_get, caplog, body, field, kind
+    ):
+        mock_get.return_value = _mock_response(body)
+        client = CrawlClient()
+        with caplog.at_level(logging.WARNING, logger=CRAWL_LOGGER):
+            result = client._probe_node("10.0.0.1", PEER_PROTOCOL_PORT)
+        assert result is None
+        warnings = _crawl_warnings(caplog)
+        assert len(warnings) == 1
+        assert warnings[0].getMessage() == (
+            "Ignoring malformed /crawl response from "
+            f"https://10.0.0.1:{PEER_PROTOCOL_PORT}/crawl — "
+            f"{field} is {kind}, expected "
+            + ("a non-empty string" if field == "server.pubkey_validator" else "an object")
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [{"server": {}}, {"overlay": []}],
+        ids=["server-empty", "server-missing"],
+    )
+    @patch.object(httpx.Client, "get")
+    def test_missing_pubkey_returns_none_without_warning(self, mock_get, caplog, body):
+        mock_get.return_value = _mock_response(body)
+        client = CrawlClient()
+        with caplog.at_level(logging.WARNING, logger=CRAWL_LOGGER):
+            result = client._probe_node("10.0.0.1", PEER_PROTOCOL_PORT)
+        assert result is None
+        assert _crawl_warnings(caplog) == []
+
+    @patch.object(httpx.Client, "get")
+    def test_transport_error_keeps_existing_warning(self, mock_get, caplog):
+        mock_get.side_effect = httpx.ConnectError("Connection refused")
+        client = CrawlClient()
+        with caplog.at_level(logging.WARNING, logger=CRAWL_LOGGER):
+            result = client._probe_node("10.0.0.1", PEER_PROTOCOL_PORT)
+        assert result is None
+        warnings = _crawl_warnings(caplog)
+        assert len(warnings) == 1
+        assert warnings[0].getMessage() == (
+            f"Failed to probe https://10.0.0.1:{PEER_PROTOCOL_PORT}/crawl — "
+            "Connection refused"
+        )
 
 
 class TestResolveValidators:
@@ -146,3 +233,27 @@ class TestResolveValidators:
         result, raw = client.resolve_validators(nodes, MASTER_KEYS)
         assert result == {"nHBvalidator1": "10.0.0.1", "nHBvalidator3": "10.0.0.5"}
         assert len(raw) == 4
+
+    @pytest.mark.parametrize(
+        ("body", "field", "kind"), MALFORMED_BODIES, ids=MALFORMED_IDS
+    )
+    @patch.object(httpx.Client, "get")
+    def test_malformed_node_does_not_stop_next_node(
+        self, mock_get, caplog, body, field, kind
+    ):
+        """A bad /crawl body from one peer is skipped; the next peer still resolves."""
+        nodes = TOPOLOGY_NODES[:2]
+        mock_get.side_effect = [
+            _mock_response(body),
+            _mock_response(_crawl_response("nHBvalidator2")),
+        ]
+        client = CrawlClient()
+        with caplog.at_level(logging.WARNING, logger=CRAWL_LOGGER):
+            result, raw = client.resolve_validators(nodes, MASTER_KEYS)
+        assert result == {"nHBvalidator2": "10.0.0.2"}
+        assert mock_get.call_count == 2
+        assert raw[0]["pubkey_validator"] is None
+        assert raw[1]["pubkey_validator"] == "nHBvalidator2"
+        warnings = _crawl_warnings(caplog)
+        assert len(warnings) == 1
+        assert f"{field} is {kind}" in warnings[0].getMessage()
