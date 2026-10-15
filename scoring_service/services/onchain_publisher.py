@@ -58,9 +58,11 @@ class OnChainPublisherService:
             round_number: Scoring round number. Embedded in the memo so
                 third parties decoding the memo can resolve it to a round
                 without a vl_sequence lookup.
-            memo_type: Override of the memo `type` field. Defaults to
-                `settings.scoring_memo_type` (automated rounds). Admin
-                override paths pass `settings.scoring_memo_type_override`.
+            memo_type: Override of the memo `type` field and of the
+                transaction's on-chain MemoType, which always match.
+                Defaults to `settings.scoring_memo_type` (automated
+                rounds). Admin override paths pass
+                `settings.scoring_memo_type_override`.
 
         Returns:
             Transaction hash on success, or None on failure.
@@ -82,7 +84,9 @@ class OnChainPublisherService:
             final_bundle_cid,
         )
 
-        success, tx_hash, error = self._pftl.submit_memo(memo_data)
+        success, tx_hash, error = self._pftl.submit_memo(
+            memo_data, memo_type=resolved_memo_type
+        )
 
         if success:
             logger.info(

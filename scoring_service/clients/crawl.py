@@ -15,6 +15,19 @@ from scoring_service.constants import PEER_PROTOCOL_PORT
 logger = logging.getLogger(__name__)
 
 
+def _malformed(url: str, field: str, value: object, expected: str) -> None:
+    """Log a malformed /crawl response and return None (no pubkey)."""
+    kind = "an empty string" if value == "" else type(value).__name__
+    logger.warning(
+        "Ignoring malformed /crawl response from %s — %s is %s, expected %s",
+        url,
+        field,
+        kind,
+        expected,
+    )
+    return None
+
+
 class CrawlClient:
     """Resolves validator IPs by probing topology nodes' /crawl endpoints."""
 
@@ -28,14 +41,33 @@ class CrawlClient:
         self._client.close()
 
     def _probe_node(self, ip: str, port: int) -> Optional[str]:
-        """Probe a single node's /crawl endpoint. Returns pubkey_validator or None."""
-        url = f"https://{ip}:{port}/crawl"
+        """Probe a single node's /crawl endpoint. Returns pubkey_validator or None.
+
+        The body comes from an arbitrary peer, so a non-object body, a
+        non-object "server" section, or a pubkey_validator that is present
+        but not a non-empty string is logged and treated as no pubkey
+        instead of raising and aborting the rest of the crawl.
+        """
+        host = f"[{ip}]" if ":" in ip and not ip.startswith("[") else ip
+        url = f"https://{host}:{port}/crawl"
         try:
             response = self._client.get(url)
             response.raise_for_status()
             data = response.json()
-            return data.get("server", {}).get("pubkey_validator")
-        except (httpx.HTTPError, httpx.TimeoutException, ValueError) as exc:
+            if not isinstance(data, dict):
+                return _malformed(url, "body", data, "an object")
+            server = data.get("server", {})
+            if not isinstance(server, dict):
+                return _malformed(url, "server", server, "an object")
+            if "pubkey_validator" not in server:
+                return None
+            pubkey = server["pubkey_validator"]
+            if not isinstance(pubkey, str) or not pubkey:
+                return _malformed(
+                    url, "server.pubkey_validator", pubkey, "a non-empty string"
+                )
+            return pubkey
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             logger.warning("Failed to probe %s — %s", url, exc)
             return None
 
